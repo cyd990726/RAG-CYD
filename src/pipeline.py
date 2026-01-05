@@ -8,6 +8,9 @@ import json
 import pandas as pd
 import shutil
 import time
+from pathlib import Path
+import os, shutil, tempfile
+from src import pdf_mineru
 
 from src.pdf_parsing import PDFParser
 from src import pdf_mineru
@@ -39,13 +42,13 @@ class PipelineConfig:
         self.documents_dir = self.databases_path / "chunked_reports"
         self.bm25_db_path = self.databases_path / "bm25_dbs"
 
-        # self.parsed_reports_dirname = "01_parsed_reports"
-        # self.parsed_reports_debug_dirname = "01_parsed_reports_debug"
+        self.parsed_reports_dirname = "01_parsed_reports"
+        self.parsed_reports_debug_dirname = "01_parsed_reports_debug"
         # self.merged_reports_dirname = f"02_merged_reports{suffix}"
         self.reports_markdown_dirname = f"03_reports_markdown{suffix}"
 
-        #self.parsed_reports_path = self.debug_data_path / self.parsed_reports_dirname
-        #self.parsed_reports_debug_path = self.debug_data_path / self.parsed_reports_debug_dirname
+        self.parsed_reports_path = self.debug_data_path / self.parsed_reports_dirname
+        self.parsed_reports_debug_path = self.debug_data_path / self.parsed_reports_debug_dirname
         #self.merged_reports_path = self.debug_data_path / self.merged_reports_dirname
         self.reports_markdown_path = self.debug_data_path / self.reports_markdown_dirname
 
@@ -119,6 +122,7 @@ class Pipeline:
         """
         logging.basicConfig(level=logging.DEBUG)
         
+        # 创建解析器
         pdf_parser = PDFParser(
             output_dir=self.paths.parsed_reports_path,
             csv_metadata_path=self.paths.subset_path
@@ -134,31 +138,144 @@ class Pipeline:
         )
         print(f"PDF reports parsed and saved to {self.paths.parsed_reports_path}")
 
+    # 将pdf文档转成md
+    # def export_reports_to_markdown(self, file_name):
+    #     """
+    #     使用 pdf_mineru.py，将指定 PDF 文件转换为 markdown，并放到 reports_markdown_dirname 目录下。
+    #     :param file_name: PDF 文件名（如 '【财报】中芯国际：中芯国际2024年年度报告.pdf'）
+    #     """
+    #     # 调用 pdf_mineru 获取 task_id 并下载、解压
+    #     print(f"开始处理: {file_name}")
+    #     task_id = pdf_mineru.get_task_id(file_name)
+    #     print(f"task_id: {task_id}")
+    #     pdf_mineru.get_result(task_id)
+
+    #     # 解压后目录名与 task_id 相同
+    #     extract_dir = f"{task_id}"
+    #     md_path = os.path.join(extract_dir, "full.md")
+    #     if not os.path.exists(md_path):
+    #         print(f"未找到 markdown 文件: {md_path}")
+    #         return
+    #     # 目标目录
+    #     os.makedirs(self.paths.reports_markdown_path, exist_ok=True)
+    #     # 目标文件名为原始 file_name，扩展名改为 .md
+    #     base_name = os.path.splitext(file_name)[0]
+    #     target_path = os.path.join(self.paths.reports_markdown_path, f"{base_name}.md")
+    #     shutil.move(md_path, target_path)
+    #     print(f"已将 {md_path} 移动到 {target_path}")
+
+
     def export_reports_to_markdown(self, file_name):
         """
-        使用 pdf_mineru.py，将指定 PDF 文件转换为 markdown，并放到 reports_markdown_dirname 目录下。
+        使用本地 MinerU 模型，将指定 PDF 文件转换为 markdown，并放到 reports_markdown_dirname 目录下。
         :param file_name: PDF 文件名（如 '【财报】中芯国际：中芯国际2024年年度报告.pdf'）
         """
-        # 调用 pdf_mineru 获取 task_id 并下载、解压
-        print(f"开始处理: {file_name}")
-        task_id = pdf_mineru.get_task_id(file_name)
-        print(f"task_id: {task_id}")
-        pdf_mineru.get_result(task_id)
+        print(f"开始处理(本地MinerU): {file_name}")
 
-        # 解压后目录名与 task_id 相同
-        extract_dir = f"{task_id}"
-        md_path = os.path.join(extract_dir, "full.md")
-        if not os.path.exists(md_path):
-            print(f"未找到 markdown 文件: {md_path}")
+        # 1) 本地 PDF 路径：按你项目真实 PDF 存放位置改
+        # 你日志里 root_path 指向 data/stock_data，所以这里通常是：
+        pdf_path = os.path.join(self.paths.pdf_reports_dir, file_name)  # 或 self.paths.stock_data_path
+
+        if not os.path.exists(pdf_path):
+            print(f"未找到 PDF 文件: {pdf_path}")
             return
-        # 目标目录
-        os.makedirs(self.paths.reports_markdown_path, exist_ok=True)
-        # 目标文件名为原始 file_name，扩展名改为 .md
+
+        # 2) MinerU 输出目录：建议每个 PDF 一个目录，避免互相覆盖
         base_name = os.path.splitext(file_name)[0]
+        safe_dir = base_name.replace("/", "_")  # 兜底，防止奇怪字符影响路径
+        extract_dir = os.path.join(self.paths.reports_markdown_path, safe_dir)  # 你需要在 paths 里加一个
+ 
+        try:
+            pdf_mineru.convert_local(pdf_path, extract_dir, backend="pipeline", source="local")
+        except Exception as e:
+            print(f"本地MinerU转换失败: {e}")
+            return
+
+        # 4) 找到生成的 markdown（优先 full.md）
+        try:
+            md_path = str(pdf_mineru.find_full_md(extract_dir))
+        except Exception as e:
+            print(f"未找到 markdown 输出: {e}")
+            return
+
+        # 5) 目标目录与命名：保持你的原逻辑
+        os.makedirs(self.paths.reports_markdown_path, exist_ok=True)
         target_path = os.path.join(self.paths.reports_markdown_path, f"{base_name}.md")
+
+        # 6) 用 move（覆盖策略你自己决定）
+        # 如果你希望覆盖旧文件，先删掉
+        if os.path.exists(target_path):
+            os.remove(target_path)
+
         shutil.move(md_path, target_path)
         print(f"已将 {md_path} 移动到 {target_path}")
 
+
+    def export_one_pdf_to_markdown(self, pdf_path):
+        pdf_path = Path(pdf_path)
+        out_dir = self.paths.reports_markdown_path
+        if not pdf_path.exists():
+            print(f"未找到 PDF: {pdf_path}")
+            return None
+
+        base_name = pdf_path.stem
+        os.makedirs(out_dir, exist_ok=True)
+        target_path = Path(out_dir) / f"{base_name}.md"
+
+        # 跳过已生成
+        if target_path.exists():
+            print(f"已存在，跳过: {target_path.name}")
+            return target_path
+
+        t0 = time.time()
+        print(f"开始处理: {pdf_path.name}")
+
+        # 这里用 GPU 跑：MinerU/后端参数各版本不同
+        # 你需要在 pdf_mineru.convert_local 内部按你的 mineru 支持的方式启用 GPU
+        pdf_mineru.convert_local(
+            pdf_path=pdf_path,
+            out_dir=out_dir,
+            backend="pipeline",   # 如果你的 mineru 支持 GPU backend，把这里换成对应值
+            source="local",
+            # extra_args=[...]     # 如果有加速参数可加在这里
+        )
+
+        print(f"完成: {target_path.name}  用时 {time.time()-t0:.2f}s")
+        return target_path
+
+
+    def export_dir_to_markdown(self):
+        """
+        批量把目录下所有 PDF 转成 Markdown。
+        """
+        pdf_dir = Path(self.paths.pdf_reports_dir)
+        if not pdf_dir.exists():
+            print(f"目录不存在: {pdf_dir}")
+            return
+
+        pdf_files = sorted(pdf_dir.rglob("*.pdf"))
+        if not pdf_files:
+            print(f"目录下没有 PDF: {pdf_dir}")
+            return
+
+        print(f"共发现 {len(pdf_files)} 个 PDF")
+
+        ok, fail = 0, 0
+        for p in pdf_files:
+            try:
+                out = self.export_one_pdf_to_markdown(p)
+                ok += 1 if out else 0
+            except Exception as e:
+                fail += 1
+                print(f"[失败] {p.name}: {e}")
+        print(f"完成：成功 {ok}，失败 {fail}")
+
+        # 规整 markdown 文件
+        pdf_mineru.flatten_md_and_cleanup(self.paths.reports_markdown_path)
+
+        return
+
+        
     def chunk_reports(self, include_serialized_tables: bool = False):
         """
         将规整后 markdown 报告分块，便于后续向量化和检索
@@ -191,7 +308,7 @@ class Pipeline:
         bm25_ingestor = BM25Ingestor()
         bm25_ingestor.process_reports(input_dir, output_file)
         print(f"BM25 database created at {output_file}")
-    
+        
     def parse_pdf_reports(self, parallel: bool = True, chunk_size: int = 2, max_workers: int = 10):
         # 解析PDF报告，支持并行处理
         if parallel:
@@ -342,20 +459,23 @@ if __name__ == "__main__":
     # 初始化主流程，使用推荐的最佳配置
     pipeline = Pipeline(root_path, run_config=max_config)
     
-    print('4. 将pdf转化为纯markdown文本')
-    pipeline.export_reports_to_markdown('【财报】中芯国际：中芯国际2024年年度报告.pdf') 
+    # print('4. 将pdf转化为纯markdown文本')
+    # pipeline.export_dir_to_markdown()
 
-    # 5. 将规整后报告分块，便于后续向量化，输出到 databases/chunked_reports
-    print('5. 将规整后报告分块，便于后续向量化，输出到 databases/chunked_reports')
-    pipeline.chunk_reports() 
+    # pipeline.export_reports_to_markdown('【财报】中芯国际：中芯国际2024年年度报告.pdf') 
+
+
+    # # 5. 将规整后报告分块，便于后续向量化，输出到 databases/chunked_reports
+    # print('5. 将规整后报告分块，便于后续向量化，输出到 databases/chunked_reports')
+    # pipeline.chunk_reports() 
     
-    # 6. 从分块报告创建向量数据库，输出到 databases/vector_dbs
-    print('6. 从分块报告创建向量数据库，输出到 databases/vector_dbs')
-    pipeline.create_vector_dbs()     
+    # # 6. 从分块报告创建向量数据库，输出到 databases/vector_dbs
+    # print('6. 从分块报告创建向量数据库，输出到 databases/vector_dbs')
+    # pipeline.create_vector_dbs()     
     
-    # 7. 处理问题并生成答案，具体逻辑取决于 run_config
-    # 默认questions.json
-    print('7. 处理问题并生成答案，具体逻辑取决于 run_config')
-    pipeline.process_questions() 
+    # # 7. 处理问题并生成答案，具体逻辑取决于 run_config
+    # # 默认questions.json
+    # print('7. 处理问题并生成答案，具体逻辑取决于 run_config')
+    # pipeline.process_questions() 
     
     print('完成')
